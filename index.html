@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Mini Sheet</title>
+  <style>
+    :root { --bg:#f8fafc; --fg:#0f172a; --muted:#64748b; --accent:#2563eb; --grid:#e2e8f0; --head:#f1f5f9; }
+    *{box-sizing:border-box} body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:var(--fg);background:var(--bg)}
+    header{position:sticky;top:0;background:white;border-bottom:1px solid var(--grid);z-index:2}
+    .toolbar{display:flex;gap:.5rem;align-items:center;padding:.5rem;border-bottom:1px solid var(--grid);}
+    .toolbar button{border:1px solid var(--grid);background:white;padding:.4rem .6rem;border-radius:.5rem;cursor:pointer}
+    .toolbar button:hover{border-color:var(--accent)}
+    .formula-bar{display:grid;grid-template-columns:80px 160px 1fr;gap:.5rem;padding:.5rem}
+    .formula-bar input{width:100%;padding:.5rem;border:1px solid var(--grid);border-radius:.5rem}
+    .container{height:calc(100vh - 112px);overflow:auto}
+    table{border-collapse:separate;border-spacing:0;min-width:max(900px,100%)}
+    th,td{border:1px solid var(--grid);}
+    thead th{position:sticky;top:72px;background:var(--head);z-index:1}
+    tbody th{position:sticky;left:0;background:var(--head);z-index:1}
+    th{font-weight:600;color:#334155;text-align:center;padding:.3rem .5rem}
+    td{min-width:100px;max-width:260px;height:28px;padding:0}
+    td div.cell{padding:.2rem .4rem;outline:none;height:100%;}
+    td.selected{outline:2px solid var(--accent);outline-offset:-2px}
+    footer{font-size:12px;color:var(--muted);padding:.5rem .75rem;border-top:1px solid var(--grid);}
+    .status{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    .help{padding:.4rem .75rem;background:#f7fee7;border:1px solid #d9f99d;border-radius:.5rem}
+    .sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);border:0}
+  </style>
+</head>
+<body>
+  <header>
+    <div class="toolbar">
+      <button id="newBtn" title="Clear sheet">New</button>
+      <button id="saveBtn" title="Save to browser">Save</button>
+      <button id="loadBtn" title="Load from browser">Load</button>
+      <button id="exportBtn" title="Download CSV">Export CSV</button>
+      <label>
+        <span class="sr-only">Import CSV</span>
+        <input id="importCsv" type="file" accept=".csv" style="display:none" />
+        <button id="importBtn" title="Upload CSV">Import CSV</button>
+      </label>
+      <div class="help">Type formulas with = like =A1+B2 or =SUM(A1:A5). Supported: SUM, AVERAGE, MIN, MAX. Click a cell to edit. Address bar shows selection.</div>
+    </div>
+    <div class="formula-bar">
+      <input id="addr" aria-label="Address" readonly />
+      <input id="nameBox" aria-label="Name" placeholder="Optional name" />
+      <input id="fx" aria-label="Formula" placeholder="Type value or formula" />
+    </div>
+  </header>
+
+  <div class="container">
+    <table id="grid" aria-label="Spreadsheet">
+      <thead id="thead"></thead>
+      <tbody id="tbody"></tbody>
+    </table>
+  </div>
+  <footer>
+    <span class="status" id="status">Ready</span>
+  </footer>
+
+<script>
+(function(){
+  const COLS = 26;  // A to Z
+  const ROWS = 50;  // 1 to 50
+  const grid = document.getElementById('grid');
+  const thead = document.getElementById('thead');
+  const tbody = document.getElementById('tbody');
+  const fx = document.getElementById('fx');
+  const addr = document.getElementById('addr');
+  const nameBox = document.getElementById('nameBox');
+  const status = document.getElementById('status');
+
+  // Data model: { raw:"=A1+B1"|"123", value:number|string }
+  const sheet = {};
+  let active = 'A1';
+  let named = {}; // simple named ranges mapping name -> address or range
+
+  const colLabel = i => String.fromCharCode(65 + i);
+  const refToKey = (c, r) => colLabel(c) + (r+1);
+  const keyToCoord = key => { const m = key.match(/^([A-Z]+)(\d+)$/); if(!m) return null; return { c: m[1].charCodeAt(0)-65, r: parseInt(m[2],10)-1 } };
+
+  // Build headers
+  const htr = document.createElement('tr');
+  htr.appendChild(document.createElement('th')); // corner
+  for(let c=0;c<COLS;c++){ const th=document.createElement('th'); th.textContent=colLabel(c); htr.appendChild(th); }
+  thead.appendChild(htr);
+
+  // Build body
+  for(let r=0;r<ROWS;r++){
+    const tr = document.createElement('tr');
+    const th = document.createElement('th'); th.textContent = r+1; tr.appendChild(th);
+    for(let c=0;c<COLS;c++){
+      const td = document.createElement('td'); td.dataset.key = refToKey(c,r);
+      const div = document.createElement('div'); div.className='cell'; div.contentEditable=true; div.spellcheck=false; div.inputMode='text';
+      div.addEventListener('focus', onCellFocus);
+      div.addEventListener('input', onCellInput);
+      div.addEventListener('keydown', onCellKey);
+      td.appendChild(div); tr.appendChild(td);
+    }
+    tbody.appendChild(tr);
+  }
+
+  // Selection helpers
+  function select(key){
+    const prev = grid.querySelector('td.selected'); if(prev) prev.classList.remove('selected');
+    const td = grid.querySelector(`td[data-key="${key}"]`);
+    if(td){ td.classList.add('selected'); td.firstChild.focus({preventScroll:true}); scrollIntoViewIfNeeded(td); }
+    active = key; addr.value = key; fx.value = getRaw(key) ?? '';
+  }
+  function scrollIntoViewIfNeeded(el){ const rect=el.getBoundingClientRect(); const par=el.closest('.container'); const pr=par.getBoundingClientRect(); if(rect.top<pr.top) el.scrollIntoView(true); if(rect.bottom>pr.bottom) el.scrollIntoView(false); if(rect.left<pr.left||rect.right>pr.right) el.scrollIntoView({block:'nearest', inline:'nearest'}); }
+
+  function onCellFocus(e){ const key = e.target.parentElement.dataset.key; active=key; addr.value=key; fx.value=getRaw(key)||''; e.target.parentElement.classList.add('selected'); }
+  function onCellInput(e){ const key = e.target.parentElement.dataset.key; const raw = e.target.textContent; setRaw(key, raw); recalcAll(); renderValues(); status.textContent = `Edited ${key}`; }
+  function onCellKey(e){
+    if(e.key==='Enter'){ e.preventDefault(); move(1,0); }
+    if(e.key==='Tab'){ e.preventDefault(); move(0, e.shiftKey?-1:1); }
+    if(e.key==='ArrowDown'){ e.preventDefault(); move(1,0); }
+    if(e.key==='ArrowUp'){ e.preventDefault(); move(-1,0); }
+    if(e.key==='ArrowLeft' && getSelStart(e.target)===0){ e.preventDefault(); move(0,-1); }
+    if(e.key==='ArrowRight' && getSelStart(e.target)===e.target.textContent.length){ e.preventDefault(); move(0,1); }
+  }
+  function getSelStart(el){ const s=window.getSelection(); if(!s||s.rangeCount===0) return 0; const r=s.getRangeAt(0); const pre=r.cloneRange(); pre.selectNodeContents(el); pre.setEnd(r.startContainer,r.startOffset); return pre.toString().length; }
+
+  function move(dr, dc){ const pos = keyToCoord(active); if(!pos) return; let r = Math.min(Math.max(pos.r+dr,0),ROWS-1); let c = Math.min(Math.max(pos.c+dc,0),COLS-1); select(refToKey(c,r)); }
+
+  // Data access
+  function getRaw(key){ return sheet[key]?.raw }
+  function setRaw(key, raw){ if(!sheet[key]) sheet[key]={raw:'',value:''}; sheet[key].raw = raw; }
+  function setValue(key, value){ if(!sheet[key]) sheet[key]={raw:'',value:''}; sheet[key].value = value; }
+  function getValue(key){ return sheet[key]?.value ?? '' }
+
+  // Formula engine
+  function recalcAll(){
+    // naive: single pass plus retries for dependencies, limited iterations to avoid loops
+    let iterations = 0; const maxIter = 100;
+    const keys = Object.keys(sheet);
+    while(iterations++ < maxIter){
+      let changed = false;
+      for(const k of keys){ const raw = sheet[k].raw; const prev = sheet[k].value;
+        const val = evaluateCell(k, raw);
+        if(prev !== val){ setValue(k, val); changed = true; }
+      }
+      if(!changed) break;
+    }
+  }
+
+  function evaluateCell(key, raw){
+    if(raw == null || raw === '') return '';
+    if(typeof raw !== 'string') return raw;
+    if(raw.trim().startsWith('=')){
+      try {
+        return computeExpression(key, raw.trim().slice(1));
+      } catch(err){ return `#ERR`; }
+    }
+    const n = Number(raw);
+    return Number.isFinite(n) && raw.trim()!=='' ? n : raw;
+  }
+
+  function tokenizeRefs(expr){
+    // Replace named references first
+    for(const nm in named){ const pattern = new RegExp(`\\b${nm}\\b`, 'g'); expr = expr.replace(pattern, `(${named[nm]})`); }
+    // Convert ranges like A1:B3 into a list function R("A1:B3") for processing
+    expr = expr.replace(/([A-Z]{1})(\d+):([A-Z]{1})(\d+)/g, (m, c1, r1, c2, r2)=>`R("${c1}${r1}:${c2}${r2}")`);
+    // Convert single refs like A1 to V("A1")
+    expr = expr.replace(/\b([A-Z]{1})(\d+)\b/g, (m,c,r)=>`V("${c}${r}")`);
+    return expr;
+  }
+
+  function cellsInRange(a, b){
+    const sA = keyToCoord(a); const sB = keyToCoord(b); if(!sA||!sB) return [];
+    const r1 = Math.min(sA.r, sB.r), r2 = Math.max(sA.r, sB.r);
+    const c1 = Math.min(sA.c, sB.c), c2 = Math.max(sA.c, sB.c);
+    const out = [];
+    for(let r=r1;r<=r2;r++) for(let c=c1;c<=c2;c++) out.push(refToKey(c,r));
+    return out;
+  }
+
+  function computeExpression(key, expr){
+    // Supported funcs
+    function V(ref){ const v = getValue(ref); return typeof v === 'number' ? v : Number(v) || 0 }
+    function R(rng){ const [a,b] = rng.split(':'); return cellsInRange(a,b).map(V); }
+    function SUM(){ const arr=[...arguments].flat(); return arr.reduce((s,x)=>s+(Number(x)||0),0) }
+    function AVERAGE(){ const arr=[...arguments].flat(); const fl=arr.map(Number).filter(x=>Number.isFinite(x)); return fl.length? fl.reduce((s,x)=>s+x,0)/fl.length : 0 }
+    function MIN(){ const arr=[...arguments].flat().map(Number).filter(Number.isFinite); return arr.length? Math.min(...arr) : 0 }
+    function MAX(){ const arr=[...arguments].flat().map(Number).filter(Number.isFinite); return arr.length? Math.max(...arr) : 0 }
+
+    let safe = tokenizeRefs(expr);
+    // guard: only allow digits, ops, parentheses, commas, dots, quotes, letters in approved identifiers
+    if(/[^0-9+\-*/().,\s"A-Z:_]/i.test(safe)) throw new Error('Bad token');
+    // Evaluate in a limited scope
+    // eslint-disable-next-line no-new-func
+    const fn = new Function('V','R','SUM','AVERAGE','MIN','MAX', `return (${safe});`);
+    const out = fn(V,R,SUM,AVERAGE,MIN,MAX);
+    if(typeof out === 'number' && !Number.isFinite(out)) return '#DIV0!';
+    return out;
+  }
+
+  function renderValues(){
+    for(const [k, obj] of Object.entries(sheet)){
+      const td = grid.querySelector(`td[data-key="${k}"]`); if(!td) continue; const div = td.firstChild;
+      const raw = obj.raw;
+      if(document.activeElement === div){ // keep raw while editing
+        continue;
+      }
+      const show = (typeof raw === 'string' && raw.trim().startsWith('=')) ? obj.value : obj.value ?? '';
+      div.textContent = show;
+    }
+  }
+
+  // Formula bar interactions
+  fx.addEventListener('keydown', e=>{ if(e.key==='Enter'){ e.preventDefault(); commitFx(); select(active); }});
+  fx.addEventListener('blur', commitFx);
+  function commitFx(){ const raw = fx.value; setRaw(active, raw); // also push into cell
+    const cell = grid.querySelector(`td[data-key="${active}"] .cell`); if(cell){ cell.textContent = raw; }
+    recalcAll(); renderValues(); }
+
+  // Address navigation
+  addr.addEventListener('keydown', e=>{ if(e.key==='Enter'){ const key = addr.value.toUpperCase(); if(grid.querySelector(`td[data-key="${key}"]`)) select(key); }});
+
+  // Toolbar actions
+  document.getElementById('newBtn').onclick = ()=>{ if(confirm('Clear the sheet?')){ for(const k of Object.keys(sheet)) delete sheet[k]; named={}; nameBox.value=''; buildEmpty(); status.textContent='New sheet'; }}
+  document.getElementById('saveBtn').onclick = ()=>{ const name = nameBox.value.trim()||'default'; localStorage.setItem('miniSheet:'+name, JSON.stringify({sheet,named})); status.textContent = 'Saved'; }
+  document.getElementById('loadBtn').onclick = ()=>{ const name = nameBox.value.trim()||'default'; const raw = localStorage.getItem('miniSheet:'+name); if(!raw){ alert('Nothing saved under this name'); return; } const obj = JSON.parse(raw); restore(obj); status.textContent='Loaded'; }
+
+  document.getElementById('exportBtn').onclick = ()=>{ const csv = toCSV(); const blob = new Blob([csv], {type:'text/csv'}); const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download=(nameBox.value.trim()||'sheet')+'.csv'; a.click(); URL.revokeObjectURL(a.href); };
+  document.getElementById('importBtn').onclick = ()=> document.getElementById('importCsv').click();
+  document.getElementById('importCsv').addEventListener('change', async e=>{
+    const file = e.target.files?.[0]; if(!file) return; const text = await file.text(); fromCSV(text); recalcAll(); renderValues(); status.textContent='Imported CSV'; e.target.value=''; });
+
+  function buildEmpty(){
+    // clear UI to blanks
+    tbody.querySelectorAll('td .cell').forEach(div=>{ div.textContent=''; });
+    fx.value=''; addr.value='A1'; select('A1');
+  }
+
+  function restore(obj){
+    for(const k of Object.keys(sheet)) delete sheet[k];
+    Object.entries(obj.sheet||{}).forEach(([k,v])=> sheet[k] = {raw:v.raw, value:v.value});
+    named = obj.named||{}; recalcAll(); renderValues(); select('A1');
+  }
+
+  function toCSV(){
+    const rows = [];
+    for(let r=0;r<ROWS;r++){
+      const cells=[];
+      for(let c=0;c<COLS;c++){
+        const k = refToKey(c,r); const raw = getRaw(k)||''; const cell = String(raw).replaceAll('"','""');
+        cells.push('"'+cell+'"');
+      }
+      rows.push(cells.join(','));
+    }
+    return rows.join('\n');
+  }
+
+  function fromCSV(text){
+    const lines = text.split(/\r?\n/); const maxR = Math.min(lines.length, ROWS);
+    for(let r=0;r<maxR;r++){
+      // simple CSV split handling quotes
+      const row = parseCsvLine(lines[r]);
+      for(let c=0;c<Math.min(row.length, COLS); c++){
+        const k = refToKey(c,r); const raw = row[c]; setRaw(k, raw); const cell = grid.querySelector(`td[data-key="${k}"] .cell`); if(cell) cell.textContent = raw;
+      }
+    }
+  }
+  function parseCsvLine(line){
+    const out=[]; let cur=''; let inQ=false; for(let i=0;i<line.length;i++){ const ch=line[i]; if(inQ){ if(ch==='"' && line[i+1]==='"'){ cur+='"'; i++; } else if(ch==='"'){ inQ=false; } else { cur+=ch; } } else { if(ch===','){ out.push(cur); cur=''; } else if(ch==='"'){ inQ=true; } else { cur+=ch; } } } out.push(cur); return out; }
+
+  // Initial state
+  select('A1'); status.textContent='Ready';
+})();
+</script>
+</body>
+</html>
