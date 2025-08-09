@@ -22,6 +22,7 @@
     td{min-width:100px;max-width:260px;height:28px;padding:0}
     td div.cell{padding:.2rem .4rem;outline:none;height:100%;}
     td.selected{outline:2px solid var(--accent);outline-offset:-2px}
+    td.dup{background:#fde68a}
     footer{font-size:12px;color:var(--muted);padding:.5rem .75rem;border-top:1px solid var(--grid);}
     .status{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
     .help{padding:.4rem .75rem;background:#f7fee7;border:1px solid #d9f99d;border-radius:.5rem}
@@ -40,7 +41,8 @@
         <input id="importCsv" type="file" accept=".csv" style="display:none" />
         <button id="importBtn" title="Upload CSV">Import CSV</button>
       </label>
-      <div class="help">Type formulas with = like =A1+B2 or =SUM(A1:A5). Supported: SUM, AVERAGE, MIN, MAX. Click a cell to edit. Address bar shows selection.</div>
+      <button id="dupBtn" title="Highlight duplicates">Duplicates</button>
+      <div class="help">Type formulas with = like =A1+B2 or =SUM(A1:A5). Supported: SUM, AVERAGE, MIN, MAX, VLOOKUP. Click a cell to edit. Address bar shows selection.</div>
     </div>
     <div class="formula-bar">
       <input id="addr" aria-label="Address" readonly />
@@ -96,6 +98,7 @@
       div.addEventListener('focus', onCellFocus);
       div.addEventListener('input', onCellInput);
       div.addEventListener('keydown', onCellKey);
+      div.addEventListener('blur', onCellBlur);
       td.appendChild(div); tr.appendChild(td);
     }
     tbody.appendChild(tr);
@@ -120,6 +123,7 @@
     if(e.key==='ArrowLeft' && getSelStart(e.target)===0){ e.preventDefault(); move(0,-1); }
     if(e.key==='ArrowRight' && getSelStart(e.target)===e.target.textContent.length){ e.preventDefault(); move(0,1); }
   }
+  function onCellBlur(){ renderValues(); }
   function getSelStart(el){ const s=window.getSelection(); if(!s||s.rangeCount===0) return 0; const r=s.getRangeAt(0); const pre=r.cloneRange(); pre.selectNodeContents(el); pre.setEnd(r.startContainer,r.startOffset); return pre.toString().length; }
 
   function move(dr, dc){ const pos = keyToCoord(active); if(!pos) return; let r = Math.min(Math.max(pos.r+dr,0),ROWS-1); let c = Math.min(Math.max(pos.c+dc,0),COLS-1); select(refToKey(c,r)); }
@@ -161,9 +165,9 @@
     // Replace named references first
     for(const nm in named){ const pattern = new RegExp(`\\b${nm}\\b`, 'g'); expr = expr.replace(pattern, `(${named[nm]})`); }
     // Convert ranges like A1:B3 into a list function R("A1:B3") for processing
-    expr = expr.replace(/([A-Z]{1})(\d+):([A-Z]{1})(\d+)/g, (m, c1, r1, c2, r2)=>`R("${c1}${r1}:${c2}${r2}")`);
+    expr = expr.replace(/([A-Z]{1})(\d+):([A-Z]{1})(\d+)/gi, (m, c1, r1, c2, r2)=>`R("${c1.toUpperCase()}${r1}:${c2.toUpperCase()}${r2}")`);
     // Convert single refs like A1 to V("A1")
-    expr = expr.replace(/\b([A-Z]{1})(\d+)\b/g, (m,c,r)=>`V("${c}${r}")`);
+    expr = expr.replace(/\b([A-Z]{1})(\d+)\b/gi, (m,c,r)=>`V("${c.toUpperCase()}${r}")`);
     return expr;
   }
 
@@ -184,14 +188,27 @@
     function AVERAGE(){ const arr=[...arguments].flat(); const fl=arr.map(Number).filter(x=>Number.isFinite(x)); return fl.length? fl.reduce((s,x)=>s+x,0)/fl.length : 0 }
     function MIN(){ const arr=[...arguments].flat().map(Number).filter(Number.isFinite); return arr.length? Math.min(...arr) : 0 }
     function MAX(){ const arr=[...arguments].flat().map(Number).filter(Number.isFinite); return arr.length? Math.max(...arr) : 0 }
+    function VLOOKUP(val, rng, col){
+      const [a,b] = rng.split(':');
+      const sA = keyToCoord(a); const sB = keyToCoord(b);
+      if(!sA || !sB) return '#N/A';
+      for(let r=sA.r; r<=sB.r; r++){
+        const key = refToKey(sA.c, r);
+        if(getValue(key) == val){
+          const target = refToKey(sA.c + col - 1, r);
+          return getValue(target);
+        }
+      }
+      return '#N/A';
+    }
 
     let safe = tokenizeRefs(expr);
     // guard: only allow digits, ops, parentheses, commas, dots, quotes, letters in approved identifiers
     if(/[^0-9+\-*/().,\s"A-Z:_]/i.test(safe)) throw new Error('Bad token');
     // Evaluate in a limited scope
     // eslint-disable-next-line no-new-func
-    const fn = new Function('V','R','SUM','AVERAGE','MIN','MAX', `return (${safe});`);
-    const out = fn(V,R,SUM,AVERAGE,MIN,MAX);
+    const fn = new Function('V','R','SUM','AVERAGE','MIN','MAX','VLOOKUP', `return (${safe});`);
+    const out = fn(V,R,SUM,AVERAGE,MIN,MAX,VLOOKUP);
     if(typeof out === 'number' && !Number.isFinite(out)) return '#DIV0!';
     return out;
   }
@@ -227,10 +244,12 @@
   document.getElementById('importBtn').onclick = ()=> document.getElementById('importCsv').click();
   document.getElementById('importCsv').addEventListener('change', async e=>{
     const file = e.target.files?.[0]; if(!file) return; const text = await file.text(); fromCSV(text); recalcAll(); renderValues(); status.textContent='Imported CSV'; e.target.value=''; });
+  document.getElementById('dupBtn').onclick = highlightDuplicates;
 
   function buildEmpty(){
     // clear UI to blanks
     tbody.querySelectorAll('td .cell').forEach(div=>{ div.textContent=''; });
+    tbody.querySelectorAll('td.dup').forEach(td=>td.classList.remove('dup'));
     fx.value=''; addr.value='A1'; select('A1');
   }
 
@@ -262,6 +281,31 @@
         const k = refToKey(c,r); const raw = row[c]; setRaw(k, raw); const cell = grid.querySelector(`td[data-key="${k}"] .cell`); if(cell) cell.textContent = raw;
       }
     }
+  }
+  function highlightDuplicates(){
+    tbody.querySelectorAll('td.dup').forEach(td=>td.classList.remove('dup'));
+    const seen=new Map();
+    for(let r=0;r<ROWS;r++){
+      for(let c=0;c<COLS;c++){
+        const k=refToKey(c,r);
+        const v=getValue(k);
+        if(v===undefined||v==='') continue;
+        const s=String(v);
+        if(!seen.has(s)) seen.set(s,[]);
+        seen.get(s).push(k);
+      }
+    }
+    let count=0;
+    for(const arr of seen.values()){
+      if(arr.length>1){
+        count+=arr.length;
+        arr.forEach(k=>{
+          const td=grid.querySelector(`td[data-key="${k}"]`);
+          if(td) td.classList.add('dup');
+        });
+      }
+    }
+    status.textContent = count?`Highlighted duplicates`:'No duplicates';
   }
   function parseCsvLine(line){
     const out=[]; let cur=''; let inQ=false; for(let i=0;i<line.length;i++){ const ch=line[i]; if(inQ){ if(ch==='"' && line[i+1]==='"'){ cur+='"'; i++; } else if(ch==='"'){ inQ=false; } else { cur+=ch; } } else { if(ch===','){ out.push(cur); cur=''; } else if(ch==='"'){ inQ=true; } else { cur+=ch; } } } out.push(cur); return out; }
