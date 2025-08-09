@@ -98,6 +98,7 @@
       div.addEventListener('focus', onCellFocus);
       div.addEventListener('input', onCellInput);
       div.addEventListener('keydown', onCellKey);
+      div.addEventListener('blur', onCellBlur);
       td.appendChild(div); tr.appendChild(td);
     }
     tbody.appendChild(tr);
@@ -122,6 +123,7 @@
     if(e.key==='ArrowLeft' && getSelStart(e.target)===0){ e.preventDefault(); move(0,-1); }
     if(e.key==='ArrowRight' && getSelStart(e.target)===e.target.textContent.length){ e.preventDefault(); move(0,1); }
   }
+  function onCellBlur(){ renderValues(); }
   function getSelStart(el){ const s=window.getSelection(); if(!s||s.rangeCount===0) return 0; const r=s.getRangeAt(0); const pre=r.cloneRange(); pre.selectNodeContents(el); pre.setEnd(r.startContainer,r.startOffset); return pre.toString().length; }
 
   function move(dr, dc){ const pos = keyToCoord(active); if(!pos) return; let r = Math.min(Math.max(pos.r+dr,0),ROWS-1); let c = Math.min(Math.max(pos.c+dc,0),COLS-1); select(refToKey(c,r)); }
@@ -163,9 +165,9 @@
     // Replace named references first
     for(const nm in named){ const pattern = new RegExp(`\\b${nm}\\b`, 'g'); expr = expr.replace(pattern, `(${named[nm]})`); }
     // Convert ranges like A1:B3 into a list function R("A1:B3") for processing
-    expr = expr.replace(/([A-Z]{1})(\d+):([A-Z]{1})(\d+)/g, (m, c1, r1, c2, r2)=>`R("${c1}${r1}:${c2}${r2}")`);
+    expr = expr.replace(/([A-Z]{1})(\d+):([A-Z]{1})(\d+)/gi, (m, c1, r1, c2, r2)=>`R("${c1.toUpperCase()}${r1}:${c2.toUpperCase()}${r2}")`);
     // Convert single refs like A1 to V("A1")
-    expr = expr.replace(/\b([A-Z]{1})(\d+)\b/g, (m,c,r)=>`V("${c}${r}")`);
+    expr = expr.replace(/\b([A-Z]{1})(\d+)\b/gi, (m,c,r)=>`V("${c.toUpperCase()}${r}")`);
     return expr;
   }
 
